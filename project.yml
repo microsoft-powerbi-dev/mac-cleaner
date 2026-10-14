@@ -1,0 +1,53 @@
+name: MacCleaner
+options:
+  bundleIdPrefix: com.maccleaner
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ARCHS: arm64
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  MacCleaner:
+    type: application
+    platform: macOS
+    sources: [MacCleaner]
+    info:
+      path: MacCleaner/App/Info.plist
+      properties:
+        CFBundleName: MacCleaner
+        CFBundleDisplayName: MacCleaner
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        LSApplicationCategoryType: public.app-category.utilities
+        LSMinimumSystemVersion: "14.0"
+        NSHumanReadableCopyright: "MIT License"
+    entitlements:
+      path: MacCleaner/App/MacCleaner.entitlements
+      properties:
+        # Sandbox off: a cleaner must read ~/Library and /Applications.
+        com.apple.security.app-sandbox: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.maccleaner.app
+        ENABLE_HARDENED_RUNTIME: NO
+    scheme:
+      testTargets: [MacCleanerTests]
+
+  MacCleanerTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [MacCleanerTests]
+    dependencies:
+      - target: MacCleaner
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.maccleaner.tests
