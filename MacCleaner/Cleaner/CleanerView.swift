@@ -7,6 +7,8 @@ final class CleanerModel {
     var results: [CategoryResult] = []
     var selectedCategories: Set<String> = Set(CleanupCatalog.all.filter(\.defaultSelected).map(\.id))
     var deselectedItems: Set<URL> = []
+    /// Items inside the cache or log folder of an app that is running. They start unchecked.
+    var inUseItems: Set<URL> = []
     var isScanning = false
     var isCleaning = false
     var showConfirm = false
@@ -29,7 +31,12 @@ final class CleanerModel {
     func scan() async {
         isScanning = true
         results = await CleanerScanner.scan(CleanupCatalog.all)
-        deselectedItems = []
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier?.lowercased() })
+        inUseItems = Set(results.flatMap(\.items).filter { item in
+            guard let owner = item.owner?.lowercased() else { return false }
+            return running.contains(owner)
+        }.map(\.url))
+        deselectedItems = inUseItems
         isScanning = false
     }
 
@@ -91,6 +98,7 @@ struct CleanerView: View {
                     } actions: {
                         Button("Scan Now") { Task { await model.scan() } }.buttonStyle(.borderedProminent)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
                 resultsList
@@ -117,7 +125,7 @@ struct CleanerView: View {
             if model.isBusy { ProgressView().controlSize(.small) }
             Button(model.results.isEmpty ? "Scan" : "Rescan") { Task { await model.scan() } }
                 .disabled(model.isBusy)
-            Button("Clean \(Format.bytes(model.selectedSize))") { model.showConfirm = true }
+            Button(model.selectedSize == 0 ? "Clean" : "Clean \(Format.bytes(model.selectedSize))") { model.showConfirm = true }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.isBusy || model.selectedSize == 0)
         }
@@ -129,6 +137,9 @@ struct CleanerView: View {
             ForEach(model.results) { result in
                 let listOnly = result.category.mode == .listOnly
                 DisclosureGroup {
+                    if result.items.isEmpty {
+                        Text("Nothing to clean here.").foregroundStyle(.secondary)
+                    }
                     ForEach(result.items.prefix(previewLimit)) { item in
                         HStack {
                             if !listOnly {
@@ -136,7 +147,13 @@ struct CleanerView: View {
                                     .labelsHidden()
                                     .disabled(!model.selectedCategories.contains(result.id))
                             }
-                            Text(item.url.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                            Text(item.displayName).lineLimit(1).truncationMode(.middle)
+                            if model.inUseItems.contains(item.url) {
+                                Text("app is running").font(.caption2)
+                                    .padding(.horizontal, 5).padding(.vertical, 1)
+                                    .background(.orange.opacity(0.2), in: Capsule())
+                                    .help("This app is open. Quit it before cleaning its files.")
+                            }
                             Spacer()
                             Text(Format.bytes(item.size)).monospacedDigit().foregroundStyle(.secondary)
                         }
@@ -163,7 +180,11 @@ struct CleanerView: View {
                             Text(result.category.detail).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text(Format.bytes(result.totalSize)).monospacedDigit().font(.headline)
+                        if result.items.isEmpty {
+                            Text("Nothing found").foregroundStyle(.secondary)
+                        } else {
+                            Text(Format.bytes(result.totalSize)).monospacedDigit().font(.headline)
+                        }
                     }
                     .padding(.vertical, 4)
                 }
@@ -186,7 +207,7 @@ struct ReportBanner: View {
                 Button("Dismiss", action: dismiss).buttonStyle(.borderless)
             }
             if !report.failures.isEmpty {
-                DisclosureGroup("\(report.failures.count) item(s) could not be removed") {
+                DisclosureGroup("\(Self.items(report.failures.count)) could not be removed") {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 4) {
                             ForEach(report.failures) { failure in
@@ -206,9 +227,13 @@ struct ReportBanner: View {
 
     private var summary: String {
         let size = Format.bytes(report.bytesFreed)
-        let count = report.removed.count
+        let count = Self.items(report.removed.count)
         return report.movedToTrash
-            ? "Moved \(count) item(s), \(size), to the Trash. Empty the Trash to free the space."
-            : "Removed \(count) item(s) and freed \(size)."
+            ? "Moved \(count), \(size), to the Trash. Empty the Trash to free the space."
+            : "Removed \(count) and freed \(size)."
+    }
+
+    private static func items(_ count: Int) -> String {
+        count == 1 ? "1 item" : "\(count) items"
     }
 }

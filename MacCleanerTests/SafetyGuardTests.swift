@@ -56,6 +56,26 @@ final class SafetyGuardTests: XCTestCase {
         }
     }
 
+    func testRejectsKeysAndCrashReportFolder() {
+        XCTAssertThrowsError(try guardian.checkPolicy(home + "/.ssh/id_ed25519"))
+        XCTAssertThrowsError(try guardian.checkPolicy(home + "/.gnupg/pubring.kbx"))
+        XCTAssertThrowsError(try guardian.checkPolicy(home + "/Library/Logs/DiagnosticReports"))
+        XCTAssertNoThrow(try guardian.checkPolicy(home + "/Library/Logs/DiagnosticReports/App.ips"))
+    }
+
+    /// Normalizing must not depend on the file system: `/private/...` stays as it is whether or not it exists.
+    func testLexicalNormalization() {
+        XCTAssertEqual(SafetyGuard.lexical("/private/tmp/does-not-exist"), "/private/tmp/does-not-exist")
+        XCTAssertEqual(SafetyGuard.lexical("/private/tmp"), "/private/tmp")
+        XCTAssertEqual(SafetyGuard.lexical("/a//b/./c/../d/"), "/a/b/d")
+        XCTAssertEqual(SafetyGuard.lexical("/../../x"), "/x")
+    }
+
+    func testValidateReturnsTheCheckedURL() throws {
+        let messy = URL(fileURLWithPath: home + "/Library/Caches/./x/../com.example.app")
+        XCTAssertEqual(try guardian.validate(messy).path, home + "/Library/Caches/com.example.app")
+    }
+
     func testTrasherRefusesBlockedPaths() {
         let report = Trasher.removeSync(
             [URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app")],

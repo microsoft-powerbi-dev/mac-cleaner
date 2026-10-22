@@ -19,8 +19,7 @@ Requirements: macOS 14+ and Xcode 16+.
 
 ```bash
 brew install xcodegen
-cd MacCleaner
-xcodegen                 # generates MacCleaner.xcodeproj from project.yml
+xcodegen                 # run from the repo root; generates MacCleaner.xcodeproj from project.yml
 open MacCleaner.xcodeproj
 ```
 Then press **⌘R** to run or **⌘U** to run the tests.

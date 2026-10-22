@@ -3,7 +3,15 @@ import Foundation
 struct ScanItem: Identifiable, Hashable, Sendable {
     let url: URL
     let size: Int64
+    /// For targets that keep child folders: the child folder this item is inside, which is
+    /// usually the owning app's bundle identifier (e.g. "com.foo.app" in ~/Library/Caches).
+    var owner: String? = nil
     var id: URL { url }
+
+    /// Short label for the preview list, e.g. "com.foo.app/Cache.db".
+    var displayName: String {
+        owner.map { "\($0)/\(url.lastPathComponent)" } ?? url.lastPathComponent
+    }
 }
 
 struct CategoryResult: Identifiable, Sendable {
@@ -38,8 +46,19 @@ enum CleanerScanner {
             if target.contentsOnly && isDir.boolValue {
                 let children = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
                 for child in children where !target.excluding.contains(child.lastPathComponent) {
-                    let size = FileSizer.size(of: child)
-                    if size > 0 { items.append(ScanItem(url: child, size: size)) }
+                    let isChildDir = (try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]))
+                        .map { $0.isDirectory == true && $0.isSymbolicLink != true } ?? false
+                    if target.keepChildFolders && isChildDir {
+                        let owner = child.lastPathComponent
+                        let inner = (try? fm.contentsOfDirectory(at: child, includingPropertiesForKeys: nil)) ?? []
+                        for item in inner {
+                            let size = FileSizer.size(of: item)
+                            if size > 0 { items.append(ScanItem(url: item, size: size, owner: owner)) }
+                        }
+                    } else {
+                        let size = FileSizer.size(of: child)
+                        if size > 0 { items.append(ScanItem(url: child, size: size)) }
+                    }
                 }
             } else {
                 let size = FileSizer.size(of: root)

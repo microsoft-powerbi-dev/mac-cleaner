@@ -40,7 +40,7 @@ struct ContentView: View {
             List(SidebarItem.allCases, selection: $selection) { item in
                 Label(item.title, systemImage: item.symbol).tag(item)
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
         } detail: {
             VStack(spacing: 0) {
                 if !hasFullDiskAccess {

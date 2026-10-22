@@ -17,11 +17,16 @@ struct CleanupCategory: Identifiable, Hashable, Sendable {
         let contentsOnly: Bool
         /// Child names to skip, either covered by another category or too risky.
         let excluding: Set<String>
+        /// true: for child folders, remove what is inside them and keep the folder itself.
+        /// Use it where each child folder belongs to an app or to macOS (~/Library/Caches,
+        /// ~/Library/Logs), because some of them expect their folder to exist.
+        let keepChildFolders: Bool
 
-        init(_ path: String, contentsOnly: Bool = true, excluding: Set<String> = []) {
+        init(_ path: String, contentsOnly: Bool = true, excluding: Set<String> = [], keepChildFolders: Bool = false) {
             self.path = path
             self.contentsOnly = contentsOnly
             self.excluding = excluding
+            self.keepChildFolders = keepChildFolders
         }
 
         var expandedPath: String { (path as NSString).expandingTildeInPath }
