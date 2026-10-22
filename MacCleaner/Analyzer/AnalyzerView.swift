@@ -26,6 +26,12 @@ final class AnalyzerModel {
 
     var current: DiskNode? { path.last }
 
+    /// True when any pending item is inside ~/Library, where files belong to apps.
+    var pendingTouchesLibrary: Bool {
+        let lib = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library").path.lowercased() + "/"
+        return pendingTrash.contains { $0.standardizedFileURL.path.lowercased().hasPrefix(lib) }
+    }
+
     func chooseFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -110,6 +116,7 @@ struct AnalyzerView: View {
                     Button("Scan Home Folder") { Task { await model.scan() } }.buttonStyle(.borderedProminent)
                     Button("Choose Folder…") { model.chooseFolder() }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .confirmationDialog(
@@ -118,7 +125,12 @@ struct AnalyzerView: View {
         ) {
             Button("Move to Trash", role: .destructive) { Task { await model.trashPending() } }
         } message: {
-            Text(model.pendingTrash.prefix(5).map(\.abbreviatedPath).joined(separator: "\n"))
+            let paths = model.pendingTrash.prefix(5).map(\.abbreviatedPath).joined(separator: "\n")
+            if model.pendingTouchesLibrary {
+                Text("Files in your Library belong to apps. Removing them can break those apps or delete their data, such as settings, documents or backups.\n\n\(paths)")
+            } else {
+                Text(paths)
+            }
         }
     }
 
@@ -137,7 +149,7 @@ struct AnalyzerView: View {
             .frame(width: 300)
             .disabled(model.result == nil)
             Button("Choose Folder…") { model.chooseFolder() }.disabled(model.isScanning)
-            Button("Rescan") { Task { await model.scan() } }.disabled(model.isScanning)
+            Button("Rescan") { Task { await model.scan() } }.disabled(model.isScanning || model.result == nil)
         }
         .padding()
     }

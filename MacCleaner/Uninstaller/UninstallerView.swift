@@ -10,6 +10,9 @@ final class UninstallerModel {
     var selectedID: URL?
     var leftovers: [Leftover] = []
     var isFindingLeftovers = false
+    /// Another copy of the selected app (same bundle identifier) is installed, so its
+    /// support files are still in use and are not offered for removal.
+    var otherCopyInstalled = false
     var deselected: Set<URL> = []
     var showConfirm = false
     var runningApp: NSRunningApplication?
@@ -40,18 +43,21 @@ final class UninstallerModel {
     func selectionChanged() async {
         leftovers = []
         deselected = []
+        otherCopyInstalled = false
         isFindingLeftovers = false
         guard let app = selectedApp, !app.isApple else { return }
         isFindingLeftovers = true
         let id = app.bundleID
         let name = app.name
+        let others = Set(apps.filter { $0.id != app.id }.compactMap(\.bundleID))
         let found = await Task.detached(priority: .userInitiated) {
-            LeftoverFinder.standard.find(bundleID: id, appName: name)
+            LeftoverFinder.standard.find(bundleID: id, appName: name, otherBundleIDs: others)
         }.value
         guard selectedApp?.id == app.id else { return }
         isFindingLeftovers = false
+        otherCopyInstalled = id.map { id in others.contains { $0.caseInsensitiveCompare(id) == .orderedSame } } ?? false
         leftovers = found
-        deselected = Set(found.filter { $0.match == .appName }.map(\.url))
+        deselected = Set(found.filter { $0.match != .bundleID }.map(\.url))
     }
 
     func requestUninstall() {
@@ -94,9 +100,12 @@ struct UninstallerView: View {
             if let report = model.lastReport {
                 ReportBanner(report: report) { model.lastReport = nil }
             }
-            HSplitView {
-                appList.frame(minWidth: 260, idealWidth: 300, maxWidth: 400)
-                detail.frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+            // A fixed-width list instead of HSplitView: HSplitView asks for its columns' combined
+            // minimum widths and pushed the window wider than the screen area it had.
+            HStack(spacing: 0) {
+                appList.frame(width: 270)
+                Divider()
+                detail.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .task { if model.apps.isEmpty { await model.load() } }
@@ -157,15 +166,17 @@ struct UninstallerView: View {
         if let app = model.selectedApp {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 14) {
-                    AppIcon(url: app.url, size: 64)
+                    AppIcon(url: app.url, size: 56)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(app.name).font(.title2.bold())
+                        Text(app.name).font(.title2.bold()).lineLimit(2)
                         Text(app.bundleID ?? "No bundle identifier").font(.caption).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
                         if let version = app.version {
-                            Text("Version \(version)").font(.caption).foregroundStyle(.secondary)
+                            Text("Version \(version)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
                     }
-                    Spacer()
+                    .help(app.bundleID ?? "")
+                    Spacer(minLength: 8)
                     VStack(alignment: .trailing) {
                         Text(Format.bytes(model.totalSize)).font(.title3.bold()).monospacedDigit()
                         Button("Uninstall") { model.requestUninstall() }
@@ -191,19 +202,16 @@ struct UninstallerView: View {
                         Section {
                             if model.isFindingLeftovers {
                                 ProgressView().frame(maxWidth: .infinity)
+                            } else if model.otherCopyInstalled {
+                                Text("Another copy of this app is installed, so its support files are kept.")
+                                    .foregroundStyle(.secondary)
                             } else if model.leftovers.isEmpty {
                                 Text("No leftover files found.").foregroundStyle(.secondary)
                             }
                             ForEach(model.leftovers) { leftover in
                                 HStack {
                                     Toggle("", isOn: model.leftoverBinding(leftover.url)).labelsHidden()
-                                    fileRow(url: leftover.url, size: leftover.size)
-                                    if leftover.match == .appName {
-                                        Text("name match").font(.caption2)
-                                            .padding(.horizontal, 5).padding(.vertical, 1)
-                                            .background(.orange.opacity(0.2), in: Capsule())
-                                            .help("Matched by folder name only. Check that it belongs to this app.")
-                                    }
+                                    fileRow(url: leftover.url, size: leftover.size, badge: Self.badge(for: leftover.match))
                                 }
                             }
                         } header: {
@@ -221,12 +229,27 @@ struct UninstallerView: View {
         }
     }
 
-    private func fileRow(url: URL, size: Int64) -> some View {
+    private static func badge(for match: Leftover.Match) -> (label: String, help: String)? {
+        switch match {
+        case .bundleID: return nil
+        case .related: return ("related", "Its name starts with this app's identifier. It may be a helper, or belong to another edition of the app.")
+        case .sharedGroup: return ("shared", "A group container. Other apps from the same developer may use it too.")
+        case .appName: return ("name match", "Matched by folder name only. Check that it belongs to this app.")
+        }
+    }
+
+    private func fileRow(url: URL, size: Int64, badge: (label: String, help: String)? = nil) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 1) {
-                Text(url.lastPathComponent).lineLimit(1)
+                Text(url.lastPathComponent).lineLimit(1).truncationMode(.middle)
                 Text(url.deletingLastPathComponent().abbreviatedPath)
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            if let badge {
+                Text(badge.label).font(.caption2)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(.orange.opacity(0.2), in: Capsule())
+                    .help(badge.help)
             }
             Spacer()
             Text(Format.bytes(size)).monospacedDigit().foregroundStyle(.secondary)

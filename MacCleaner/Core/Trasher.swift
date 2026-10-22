@@ -39,11 +39,11 @@ enum Trasher {
         var report = DeletionReport(movedToTrash: mode == .moveToTrash)
         for url in items {
             do {
-                try safety.validate(url)
-                let size = FileSizer.size(of: url)
+                let checked = try safety.validate(url)
+                let size = FileSizer.size(of: checked)
                 switch mode {
-                case .moveToTrash: try fm.trashItem(at: url, resultingItemURL: nil)
-                case .deletePermanently: try fm.removeItem(at: url)
+                case .moveToTrash: try fm.trashItem(at: checked, resultingItemURL: nil)
+                case .deletePermanently: try fm.removeItem(at: checked)
                 }
                 report.removed.append(url)
                 report.bytesFreed += size

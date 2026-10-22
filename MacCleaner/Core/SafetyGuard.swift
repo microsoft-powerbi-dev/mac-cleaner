@@ -51,6 +51,8 @@ struct SafetyGuard: Sendable {
                 lib + "/Calendars",
                 lib + "/Safari",
                 home + "/Pictures/Photos Library.photoslibrary",
+                home + "/.ssh",                // SSH keys
+                home + "/.gnupg",              // GPG keys
             ],
             protectedExact: [
                 home, "/Applications", home + "/Applications",
@@ -63,6 +65,7 @@ struct SafetyGuard: Sendable {
                 lib + "/Saved Application State", lib + "/HTTPStorages", lib + "/WebKit",
                 lib + "/LaunchAgents", lib + "/Cookies", lib + "/Application Scripts",
                 lib + "/Developer", lib + "/Developer/Xcode", lib + "/Developer/CoreSimulator",
+                lib + "/Logs/DiagnosticReports",   // macOS writes crash reports here
             ]
         )
     }()
@@ -81,8 +84,10 @@ struct SafetyGuard: Sendable {
     }
 
     /// Full check before deleting `url`: policy, symlinks in the parent chain, own bundle.
-    func validate(_ url: URL) throws {
-        let path = url.standardizedFileURL.path
+    /// Returns the URL that was checked. Callers must delete that URL, not the one they passed in.
+    @discardableResult
+    func validate(_ url: URL) throws -> URL {
+        let path = Self.lexical(url.path)
         try checkPolicy(path)
 
         let parent = (path as NSString).deletingLastPathComponent
@@ -94,6 +99,7 @@ struct SafetyGuard: Sendable {
         if normalized == ownBundle || normalized.hasPrefix(ownBundle + "/") {
             throw Violation.protected(path)
         }
+        return URL(fileURLWithPath: path)
     }
 
     static func realPath(_ path: String) -> String? {
@@ -103,8 +109,21 @@ struct SafetyGuard: Sendable {
     }
 
     private static func normalize(_ path: String) -> String {
-        var p = (path as NSString).standardizingPath.lowercased()
-        while p.count > 1 && p.hasSuffix("/") { p.removeLast() }
-        return p
+        lexical(path).lowercased()
+    }
+
+    /// Resolves `.`, `..` and repeated slashes as text only. Unlike `NSString.standardizingPath`,
+    /// the result never depends on what exists on disk (that call drops `/private` only for
+    /// paths that exist).
+    static func lexical(_ path: String) -> String {
+        var parts: [Substring] = []
+        for part in path.split(separator: "/", omittingEmptySubsequences: true) {
+            switch part {
+            case ".": continue
+            case "..": if !parts.isEmpty { parts.removeLast() }
+            default: parts.append(part)
+            }
+        }
+        return "/" + parts.joined(separator: "/")
     }
 }

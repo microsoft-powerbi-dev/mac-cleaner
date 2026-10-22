@@ -8,19 +8,31 @@ enum CleanupCatalog {
         "com.apple.Safari", "Google", "Firefox", "Microsoft Edge",
     ]
 
+    /// Folders inside ~/Library/Caches that hold sign-in, sync or download state rather than
+    /// throwaway data. Removing them can sign you out of iCloud or cancel downloads in progress.
+    static let protectedCaches: Set<String> = [
+        "CloudKit", "com.apple.bird", "com.apple.akd", "com.apple.nsurlsessiond",
+        "com.apple.containermanagerd", "com.apple.HomeKit", "FamilyCircle",
+        "com.apple.iCloudHelper", "com.apple.ap.adprivacyd",
+    ]
+
     static let all: [CleanupCategory] = [
         .init(
             id: "userCaches", name: "User Caches",
             detail: "Temporary data apps store in ~/Library/Caches. Apps rebuild it when needed.",
             symbol: "internaldrive",
-            targets: [.init("~/Library/Caches", excluding: cachesHandledElsewhere)],
+            targets: [.init(
+                "~/Library/Caches",
+                excluding: cachesHandledElsewhere.union(protectedCaches),
+                keepChildFolders: true
+            )],
             defaultSelected: true, mode: .trash
         ),
         .init(
             id: "userLogs", name: "User Logs",
             detail: "Diagnostic logs written by apps.",
             symbol: "doc.text",
-            targets: [.init("~/Library/Logs")],
+            targets: [.init("~/Library/Logs", keepChildFolders: true)],
             defaultSelected: true, mode: .trash
         ),
         .init(
