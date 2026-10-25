@@ -9,14 +9,34 @@ A free, open-source CleanMyMac alternative for Apple Silicon Macs. It's a native
 | **Disk Analyzer** | Lets you drill down through folder sizes and shows a donut chart. Includes "Large Files" (over 100 MB) and "Old Files" (over 10 MB, not opened in a year) lists. |
 | **System Monitor** | A menu-bar popover and dashboard showing CPU (with history), memory, disk, battery and thermal state. Thermal state matters on the fanless M4 MacBook Air. |
 
+## Screenshots
+
+| Overview | Junk Cleaner |
+|---|---|
+| ![Overview](docs/screenshots/overview.png) | ![Junk Cleaner](docs/screenshots/cleaner.png) |
+| **Uninstaller** | **Disk Analyzer** |
+| ![Uninstaller](docs/screenshots/uninstaller.png) | ![Disk Analyzer](docs/screenshots/analyzer.png) |
+
 ## Safety
 - **Files go to the Trash by default.** The only permanent deletion is the "Empty Trash" category, and it is off by default.
 - Every deletion passes `SafetyGuard`. Only paths inside your home folder or `/Applications` are allowed. `/System`, `/usr`, `/Library`, `/private`, iCloud Drive, cloud storage, Keychains, Mail, Messages and the Photos library are always blocked. Paths that go through a symlink are rejected.
 - Apple apps (`com.apple.*`) can't be uninstalled. Leftovers that match only by folder name start unchecked.
 
-## Build (on your Mac)
-Requirements: macOS 14+ and Xcode 16+.
+## Install
+Requirements: an Apple Silicon Mac, macOS 14+ and Xcode 16+.
 
+```bash
+git clone https://github.com/microsoft-powerbi-dev/mac-cleaner.git && cd mac-cleaner
+./scripts/install.sh
+```
+The script installs XcodeGen with Homebrew if needed, builds a Release copy, installs it to `/Applications/MacCleaner.app` and opens it. Pass `--no-open` to skip launching it. Run the script again to update.
+
+To remove the app, its preferences and its Full Disk Access entry:
+```bash
+./scripts/uninstall.sh
+```
+
+## Build for development
 ```bash
 brew install xcodegen
 xcodegen                 # run from the repo root; generates MacCleaner.xcodeproj from project.yml
@@ -24,7 +44,6 @@ open MacCleaner.xcodeproj
 ```
 Then press **⌘R** to run or **⌘U** to run the tests.
 
-To make a standalone app: **Product → Archive → Distribute App → Copy App**, then drag `MacCleaner.app` into `/Applications`.
 
 ## Full Disk Access
 macOS hides caches, Mail downloads and the Trash from apps until you allow it:
@@ -42,6 +61,8 @@ MacCleaner/Uninstaller  App inventory, leftover finder, UI
 MacCleaner/Analyzer     Disk tree scanner, UI
 MacCleaner/Monitor      Mach/IOKit stats, menu-bar and dashboard UI
 MacCleanerTests         Safety, leftover-matching and catalog tests
+scripts                 install.sh / uninstall.sh
+docs/screenshots        README images
 ```
 To add a cleanup category, add an entry to `CleanupCatalog.all`. The catalog tests check that every new path passes the safety policy.
 
