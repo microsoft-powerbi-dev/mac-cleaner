@@ -29,6 +29,9 @@ targets:
         LSApplicationCategoryType: public.app-category.utilities
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: "MIT License"
+        # Lets the optional AI integration reach Ollama / LM Studio on this Mac or the local network over http.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
     entitlements:
       path: MacCleaner/App/MacCleaner.entitlements
       properties:

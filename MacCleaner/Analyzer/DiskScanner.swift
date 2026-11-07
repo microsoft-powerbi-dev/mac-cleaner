@@ -15,6 +15,8 @@ struct FileEntry: Identifiable, Hashable, Sendable {
     let url: URL
     let size: Int64
     let lastAccess: Date?
+    var modified: Date? = nil
+    var kind: FileKind = .other
 
     var id: URL { url }
     var name: String { url.lastPathComponent }
@@ -22,8 +24,25 @@ struct FileEntry: Identifiable, Hashable, Sendable {
 
 struct DiskScanResult: Sendable {
     let root: DiskNode
-    let largeFiles: [FileEntry]
-    let oldFiles: [FileEntry]
+    /// Every file of at least `DiskScanner.keepFileThreshold`, largest first (capped).
+    let files: [FileEntry]
+    /// Bytes per kind and per modification age, over every file scanned (not only large ones).
+    let kindTotals: [FileKind: Int64]
+    let ageTotals: [AgeBucket: Int64]
+    let fileCount: Int
+    let scannedAt: Date
+
+    var largeFiles: [FileEntry] { files.filter { $0.size >= DiskScanner.largeFileThreshold } }
+
+    var oldFiles: [FileEntry] { oldFiles(notOpenedForDays: 365) }
+
+    func oldFiles(notOpenedForDays days: Int) -> [FileEntry] {
+        let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: scannedAt) ?? scannedAt
+        return files.filter { file in
+            guard file.size >= DiskScanner.oldFileThreshold, let accessed = file.lastAccess else { return false }
+            return accessed < cutoff
+        }
+    }
 }
 
 /// A thread-safe flag that tells a running scan to stop.
@@ -35,22 +54,26 @@ final class CancelFlag: @unchecked Sendable {
     func set() { lock.withLock { value = true } }
 }
 
-/// Walks a folder tree once and builds a size tree plus "large" and "old" file lists.
+/// Walks a folder tree once and builds a size tree, a list of big files and per-kind totals.
 /// Runs synchronously. Call it from a detached task.
 final class DiskScanner {
-    static let keepFileThreshold: Int64 = 1_000_000      // files shown in the tree
-    static let largeFileThreshold: Int64 = 100_000_000   // "Large files" tab
+    static let keepFileThreshold: Int64 = 1_000_000      // files shown in the tree and kept in `files`
+    static let largeFileThreshold: Int64 = 100_000_000   // "Large files" default
     static let oldFileThreshold: Int64 = 10_000_000      // "Old files" tab (and not opened for a year)
+    static let maxFiles = 50_000
 
     private let keys: [URLResourceKey] = [
         .isDirectoryKey, .isSymbolicLinkKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey,
-        .contentAccessDateKey,
+        .contentAccessDateKey, .contentModificationDateKey,
     ]
     private let skip: Set<String>
     private let cancel: CancelFlag
-    private let oldCutoff = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
-    private var large: [FileEntry] = []
-    private var old: [FileEntry] = []
+    private let now = Date()
+    private var files: [FileEntry] = []
+    private var kindTotals: [FileKind: Int64] = [:]
+    private var ageTotals: [AgeBucket: Int64] = [:]
+    private var fileCount = 0
+    private var extensionCache: [String: FileKind] = [:]
 
     init(cancel: CancelFlag) {
         self.cancel = cancel
@@ -60,15 +83,19 @@ final class DiskScanner {
     }
 
     func scan(_ root: URL) -> DiskScanResult {
-        let tree = walk(root)
+        let tree = walk(root, context: nil)
+        files.sort { $0.size > $1.size }
         return DiskScanResult(
             root: tree,
-            largeFiles: Array(large.sorted { $0.size > $1.size }.prefix(500)),
-            oldFiles: Array(old.sorted { $0.size > $1.size }.prefix(500))
+            files: Array(files.prefix(Self.maxFiles)),
+            kindTotals: kindTotals,
+            ageTotals: ageTotals,
+            fileCount: fileCount,
+            scannedAt: now
         )
     }
 
-    private func walk(_ dir: URL) -> DiskNode {
+    private func walk(_ dir: URL, context: FileKind?) -> DiskNode {
         let fm = FileManager.default
         guard !cancel.isSet, !skip.contains(dir.path),
               let entries = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys)
@@ -82,20 +109,22 @@ final class DiskScanner {
         for entry in entries {
             guard let v = try? entry.resourceValues(forKeys: keySet), v.isSymbolicLink != true else { continue }
             if v.isDirectory == true {
-                let child = walk(entry)
+                let child = walk(entry, context: context ?? FileKind.directoryContext(entry.lastPathComponent))
                 total += child.size
                 if child.size > 0 { nodes.append(child) }
             } else {
                 let size = Int64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0)
                 total += size
+                fileCount += 1
+                let kind = FileKind.classify(fileName: entry.lastPathComponent, context: context, cache: &extensionCache)
+                kindTotals[kind, default: 0] += size
+                ageTotals[AgeBucket.bucket(for: v.contentModificationDate, now: now), default: 0] += size
                 if size >= Self.keepFileThreshold {
                     nodes.append(DiskNode(url: entry, isDirectory: false, size: size, children: []))
-                }
-                if size >= Self.largeFileThreshold {
-                    large.append(FileEntry(url: entry, size: size, lastAccess: v.contentAccessDate))
-                }
-                if size >= Self.oldFileThreshold, let accessed = v.contentAccessDate, accessed < oldCutoff {
-                    old.append(FileEntry(url: entry, size: size, lastAccess: accessed))
+                    files.append(FileEntry(
+                        url: entry, size: size, lastAccess: v.contentAccessDate,
+                        modified: v.contentModificationDate, kind: kind
+                    ))
                 }
             }
         }

@@ -11,7 +11,9 @@ set -euo pipefail
 APP_NAME="MacCleaner"
 DEST_DIR="/Applications"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="$ROOT/build/install"
+# ".noindex" keeps Spotlight from indexing the build copy, so it doesn't show up as a second app.
+BUILD_DIR="$ROOT/build/install.noindex"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 OPEN_AFTER=1
 
 for arg in "$@"; do
@@ -61,6 +63,13 @@ SUDO=""
 $SUDO rm -rf "$DEST_DIR/$APP_NAME.app"
 $SUDO ditto "$BUILT_APP" "$DEST_DIR/$APP_NAME.app"
 $SUDO xattr -dr com.apple.quarantine "$DEST_DIR/$APP_NAME.app" 2>/dev/null || true
+
+# Only the installed copy should appear in Launchpad, Spotlight and "Open With". Xcode registers
+# the build product with Launch Services, so unregister it and delete it (intermediates are kept,
+# so the next build is still incremental).
+"$LSREGISTER" -u "$BUILT_APP" >/dev/null 2>&1 || true
+rm -rf "$BUILT_APP"
+"$LSREGISTER" -f "$DEST_DIR/$APP_NAME.app" >/dev/null 2>&1 || true
 
 printf '\n\033[1;32mInstalled %s to %s.\033[0m\n' "$APP_NAME" "$DEST_DIR"
 cat <<MSG

@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case dashboard, cleaner, uninstaller, analyzer
+    case dashboard, cleaner, uninstaller, analyzer, settings
 
     var id: Self { self }
 
@@ -12,6 +12,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .cleaner: return "Junk Cleaner"
         case .uninstaller: return "Uninstaller"
         case .analyzer: return "Disk Analyzer"
+        case .settings: return "Settings"
         }
     }
 
@@ -21,6 +22,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .cleaner: return "sparkles"
         case .uninstaller: return "trash.square"
         case .analyzer: return "chart.pie"
+        case .settings: return "gearshape"
         }
     }
 }
@@ -37,8 +39,13 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(SidebarItem.allCases, selection: $selection) { item in
-                Label(item.title, systemImage: item.symbol).tag(item)
+            List(selection: $selection) {
+                ForEach(SidebarItem.allCases.filter { $0 != .settings }) { item in
+                    Label(item.title, systemImage: item.symbol).tag(item)
+                }
+                Section {
+                    Label(SidebarItem.settings.title, systemImage: SidebarItem.settings.symbol).tag(SidebarItem.settings)
+                }
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
         } detail: {
@@ -51,6 +58,7 @@ struct ContentView: View {
                 case .cleaner: CleanerView(model: cleaner)
                 case .uninstaller: UninstallerView(model: uninstaller)
                 case .analyzer: AnalyzerView(model: analyzer)
+                case .settings: SettingsPage()
                 }
             }
         }
