@@ -89,7 +89,9 @@ struct BreakdownView: View {
                 BarMark(x: .value("Age", slice.title), y: .value("GB", Double(slice.bytes) / 1e9))
                     .foregroundStyle(.teal)
                     .annotation(position: .top) {
-                        Text(Format.bytes(slice.bytes)).font(.caption2).foregroundStyle(.secondary)
+                        if slice.bytes > 0 {
+                            Text(Format.bytes(slice.bytes)).font(.caption2).foregroundStyle(.secondary)
+                        }
                     }
             }
             .chartYAxisLabel("GB")
@@ -103,12 +105,20 @@ struct BreakdownView: View {
             .map { Slice(id: $0.url.path, title: $0.name, bytes: $0.size) }
         return VStack(alignment: .leading, spacing: 8) {
             Text("Largest items in \(result.root.name)").font(.headline)
-            Chart(folders) { slice in
-                BarMark(x: .value("GB", Double(slice.bytes) / 1e9), y: .value("Item", slice.title))
-                    .foregroundStyle(.indigo)
+            let top = max(1, folders.first?.bytes ?? 1)
+            ForEach(folders) { slice in
+                HStack {
+                    Text(slice.title).lineLimit(1).truncationMode(.middle).frame(width: 130, alignment: .leading)
+                    GeometryReader { geo in
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.indigo.gradient)
+                            .frame(width: max(2, geo.size.width * CGFloat(slice.bytes) / CGFloat(top)))
+                    }
+                    .frame(height: 12)
+                    Text(Format.bytes(slice.bytes)).monospacedDigit().foregroundStyle(.secondary)
+                        .frame(width: 80, alignment: .trailing)
+                }
             }
-            .chartXAxisLabel("GB")
-            .frame(height: 200)
         }
         .frame(maxWidth: .infinity)
     }
