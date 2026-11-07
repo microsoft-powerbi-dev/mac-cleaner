@@ -7,22 +7,85 @@ import SwiftUI
 final class AnalyzerModel {
     enum Tab: String, CaseIterable, Identifiable {
         case folders = "Folders"
-        case large = "Large Files"
+        case breakdown = "Breakdown"
+        case largest = "Largest"
         case old = "Old Files"
+        case duplicates = "Duplicates"
+        case history = "History"
         var id: Self { self }
+
+        var symbol: String {
+            switch self {
+            case .folders: return "folder"
+            case .breakdown: return "chart.bar.xaxis"
+            case .largest: return "arrow.up.right.square"
+            case .old: return "clock"
+            case .duplicates: return "doc.on.doc"
+            case .history: return "chart.xyaxis.line"
+            }
+        }
     }
 
-    var rootURL = FileManager.default.homeDirectoryForCurrentUser
+    var rootURL = Prefs.defaultScanURL
     var result: DiskScanResult?
     /// Drill-down stack. The last element is the folder being shown.
     var path: [DiskNode] = []
     var isScanning = false
     var tab: Tab = .folders
+    /// Items trashed or moved away since the last scan; hidden from every list.
     var removed: Set<URL> = []
     var tableSelection: Set<URL> = []
     var pendingTrash: [URL] = []
     var lastReport: DeletionReport?
     private var cancel = CancelFlag()
+
+    // Largest
+    var filter = AnalyzerModel.defaultFilter
+    var showHogs = false
+    private(set) var hogs: [SpaceHog] = []
+
+    // Duplicates
+    var duplicateGroups: [DuplicateGroup]?
+    var isFindingDuplicates = false
+    var duplicateProgress = 0.0
+    var keepRule: KeepRule = .newest
+    /// Group id → the copy to keep.
+    var duplicateKeep: [String: URL] = [:]
+    /// Extra copies the user unticked (they'll be left alone).
+    var duplicateSkip: Set<URL> = []
+    private var duplicateCancel = CancelFlag()
+
+    // History
+    let historyStore: UsageHistoryStore
+    var history: [UsageSnapshot] = []
+    var compareDate: Date?
+
+    // AI insights
+    var adviceItem: AdvisorItem?
+    var advice: Advice?
+    var isAdvising = false
+    var showInspector = false
+    var scanReport: ScanReport?
+    var isSummarizing = false
+    var showReport = false
+
+    // Moving
+    var pendingMove: [URL] = []
+    var isMoving = false
+    var moveStatus = ""
+    var lastMoveReport: MoveReport?
+
+    /// The Largest filter as configured in Settings.
+    static var defaultFilter: FileFilter {
+        var filter = FileFilter()
+        filter.minSize = Prefs.largestMinSizeOption
+        return filter
+    }
+
+    init(historyStore: UsageHistoryStore = .standard) {
+        self.historyStore = historyStore
+        history = historyStore.load()
+    }
 
     var current: DiskNode? { path.last }
 
@@ -47,11 +110,16 @@ final class AnalyzerModel {
 
     func scan() async {
         cancel.set()
+        stopDuplicates()
         let flag = CancelFlag()
         cancel = flag
         isScanning = true
         removed = []
         tableSelection = []
+        duplicateGroups = nil
+        duplicateKeep = [:]
+        duplicateSkip = []
+        scanReport = nil
         let root = rootURL
         let scanned = await Task.detached(priority: .userInitiated) {
             DiskScanner(cancel: flag).scan(root)
@@ -59,6 +127,9 @@ final class AnalyzerModel {
         guard !flag.isSet else { return }   // a newer scan replaced this one, or the user stopped it
         result = scanned
         path = [scanned.root]
+        hogs = DiskInsights.spaceHogs(root: scanned.root, minSize: Prefs.hogMinBytes)
+        history = historyStore.append(UsageSnapshot(scan: scanned, volume: SystemStats.disk()), limit: Prefs.historySnapshotLimit)
+        compareDate = nil
         isScanning = false
     }
 
@@ -75,13 +146,152 @@ final class AnalyzerModel {
         files.filter { !removed.contains($0.url) }
     }
 
+    func open(_ hog: SpaceHog) {
+        path = hog.chain
+        tab = .folders
+    }
+
     func trashPending() async {
         let urls = pendingTrash
         pendingTrash = []
         let report = await Trasher.remove(urls, mode: .moveToTrash)
-        removed.formUnion(report.removed)
-        tableSelection.subtract(report.removed)
+        markGone(report.removed)
         lastReport = report
+    }
+
+    private func markGone(_ urls: [URL]) {
+        removed.formUnion(urls)
+        tableSelection.subtract(urls)
+        let gone = Set(urls)
+        if let groups = duplicateGroups {
+            duplicateGroups = groups.map { $0.removing(gone) }.filter { $0.files.count > 1 }
+        }
+        duplicateSkip.subtract(gone)
+    }
+
+    // MARK: Duplicates
+
+    func findDuplicates() async {
+        guard let result else { return }
+        duplicateCancel.set()
+        let flag = CancelFlag()
+        duplicateCancel = flag
+        isFindingDuplicates = true
+        duplicateProgress = 0
+        let candidates = visible(result.files)
+        let minSize = Prefs.duplicateMinBytes
+        let progress: @Sendable (Double) -> Void = { [weak self] fraction in
+            Task { @MainActor in self?.duplicateProgress = fraction }
+        }
+        let groups = await Task.detached(priority: .userInitiated) {
+            DuplicateFinder.find(candidates, minSize: minSize, cancel: flag, progress: progress)
+        }.value
+        guard !flag.isSet else { return }
+        duplicateGroups = groups
+        applyKeepRule()
+        isFindingDuplicates = false
+    }
+
+    func stopDuplicates() {
+        duplicateCancel.set()
+        isFindingDuplicates = false
+    }
+
+    func applyKeepRule() {
+        duplicateKeep = [:]
+        duplicateSkip = []
+        for group in duplicateGroups ?? [] {
+            if let keep = keepRule.pick(from: group.files) { duplicateKeep[group.id] = keep.url }
+        }
+    }
+
+    func kept(_ group: DuplicateGroup) -> URL? {
+        duplicateKeep[group.id] ?? group.files.first?.url
+    }
+
+    /// Every copy that will be trashed: all but the kept one, minus the ones the user unticked.
+    var duplicateExtras: [FileEntry] {
+        (duplicateGroups ?? []).flatMap { group in
+            let keep = kept(group)
+            return group.files.filter { $0.url != keep && !duplicateSkip.contains($0.url) }
+        }
+    }
+
+    var duplicateWaste: Int64 { (duplicateGroups ?? []).reduce(0) { $0 + $1.wasted } }
+
+    // MARK: History
+
+    /// Scan snapshots of the folder currently analyzed, oldest first.
+    var rootHistory: [UsageSnapshot] {
+        let root = (result?.root.url ?? rootURL).path
+        return history.filter { $0.rootPath == root }
+    }
+
+    /// Picks up history changes and default-folder changes made in Settings.
+    func reloadPreferences() {
+        history = historyStore.load()
+        if result == nil && !isScanning { rootURL = Prefs.defaultScanURL }
+    }
+
+    func clearHistory() {
+        historyStore.clear()
+        history = []
+        compareDate = nil
+    }
+
+    // MARK: AI insights
+
+    func explain(_ item: AdvisorItem) {
+        adviceItem = item
+        advice = nil
+        isAdvising = true
+        showInspector = true
+        Task {
+            let result = await DiskAdvisor.advise(item)
+            guard adviceItem?.id == item.id else { return }
+            advice = result
+            isAdvising = false
+        }
+    }
+
+    func summarize() {
+        guard let result else { return }
+        showReport = true
+        isSummarizing = true
+        let previous = rootHistory.dropLast().last
+        let volume = SystemStats.disk()
+        let input = ScanSummaryInput(
+            rootPath: result.root.url.path,
+            rootSize: result.root.size,
+            volumeFree: volume.free,
+            volumeTotal: volume.total,
+            kindTotals: result.kindTotals,
+            hogs: hogs.prefix(8).filter { !removed.contains($0.id) }.map { AdvisorItem(node: $0.node) },
+            largestFiles: visible(result.files).prefix(5).map { AdvisorItem(file: $0) },
+            duplicateWaste: duplicateGroups == nil ? nil : duplicateWaste,
+            growthSincePrevious: previous.flatMap { prev in prev.rootSize.map { (result.root.size - $0, prev.date) } }
+        )
+        Task {
+            scanReport = await DiskAdvisor.summarize(input)
+            isSummarizing = false
+        }
+    }
+
+    // MARK: Moving
+
+    func move(to destination: URL) async {
+        let urls = pendingMove
+        pendingMove = []
+        isMoving = true
+        moveStatus = "Preparing…"
+        let report = await Mover.move(urls, to: destination) { [weak self] done, total, name in
+            Task { @MainActor in
+                self?.moveStatus = name.isEmpty ? "Finishing…" : "Copying \(name) (\(done + 1) of \(total))…"
+            }
+        }
+        markGone(report.moved.map(\.source))
+        lastMoveReport = report
+        isMoving = false
     }
 }
 
@@ -95,6 +305,18 @@ struct AnalyzerView: View {
             if let report = model.lastReport {
                 ReportBanner(report: report) { model.lastReport = nil }
             }
+            if let report = model.lastMoveReport {
+                MoveReportBanner(report: report) { model.lastMoveReport = nil }
+            }
+            if model.isMoving {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text(model.moveStatus).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(10)
+                .background(.quaternary.opacity(0.5))
+            }
             if model.isScanning {
                 VStack(spacing: 12) {
                     ProgressView("Scanning \(model.rootURL.abbreviatedPath)…")
@@ -104,20 +326,39 @@ struct AnalyzerView: View {
             } else if let result = model.result {
                 switch model.tab {
                 case .folders: folders
-                case .large: fileTable(model.visible(result.largeFiles), empty: "No files over \(Format.bytes(DiskScanner.largeFileThreshold)).")
-                case .old: fileTable(model.visible(result.oldFiles), empty: "No large files left unopened for over a year.")
+                case .breakdown: BreakdownView(model: model, result: result)
+                case .largest: LargestView(model: model, result: result)
+                case .old:
+                    let days = Prefs.oldFileDayCount
+                    AnalyzerFileTable(model: model, files: model.visible(result.oldFiles(notOpenedForDays: days)),
+                                      empty: "No files of \(Format.bytes(DiskScanner.oldFileThreshold)) or more left unopened for \(days) days.")
+                case .duplicates: DuplicatesView(model: model)
+                case .history: HistoryView(model: model)
                 }
+            } else if model.tab == .history && !model.history.isEmpty {
+                HistoryView(model: model)
             } else {
                 ContentUnavailableView {
                     Label("See what's using your disk", systemImage: "chart.pie")
                 } description: {
-                    Text("Scan a folder to find the biggest folders, large files and files you haven't opened in a year.")
+                    Text("Scan a folder to find the biggest folders and files, duplicates, files you haven't opened in a year, and how your disk usage changes over time.")
                 } actions: {
                     Button("Scan Home Folder") { Task { await model.scan() } }.buttonStyle(.borderedProminent)
                     Button("Choose Folder…") { model.chooseFolder() }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .onAppear { model.reloadPreferences() }
+        .inspector(isPresented: $model.showInspector) {
+            InsightsPanel(model: model)
+                .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
+        }
+        .sheet(isPresented: $model.showReport) {
+            ScanReportView(model: model)
+        }
+        .sheet(isPresented: Binding(get: { !model.pendingMove.isEmpty }, set: { if !$0 { model.pendingMove = [] } })) {
+            MoveSheet(model: model)
         }
         .confirmationDialog(
             "Move \(model.pendingTrash.count) item(s) to the Trash?",
@@ -126,30 +367,39 @@ struct AnalyzerView: View {
             Button("Move to Trash", role: .destructive) { Task { await model.trashPending() } }
         } message: {
             let paths = model.pendingTrash.prefix(5).map(\.abbreviatedPath).joined(separator: "\n")
+            let more = model.pendingTrash.count > 5 ? "\n…and \(model.pendingTrash.count - 5) more" : ""
             if model.pendingTouchesLibrary {
-                Text("Files in your Library belong to apps. Removing them can break those apps or delete their data, such as settings, documents or backups.\n\n\(paths)")
+                Text("Files in your Library belong to apps. Removing them can break those apps or delete their data, such as settings, documents or backups.\n\n\(paths)\(more)")
             } else {
-                Text(paths)
+                Text(paths + more)
             }
         }
     }
 
     private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Disk Analyzer").font(.title2.bold())
-                Text(model.rootURL.abbreviatedPath).foregroundStyle(.secondary)
+        VStack(spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Disk Analyzer").font(.title2.bold())
+                    Text(model.rootURL.abbreviatedPath).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    model.summarize()
+                } label: {
+                    Label("Analyze Results", systemImage: "sparkles")
+                }
+                .disabled(model.result == nil || model.isScanning)
+                .help("Explain what's using space and how to clean it up (on-device AI when available)")
+                Button("Choose Folder…") { model.chooseFolder() }.disabled(model.isScanning)
+                Button("Rescan") { Task { await model.scan() } }.disabled(model.isScanning || model.result == nil)
             }
-            Spacer()
             Picker("", selection: $model.tab) {
-                ForEach(AnalyzerModel.Tab.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(AnalyzerModel.Tab.allCases) { Label($0.rawValue, systemImage: $0.symbol).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 300)
-            .disabled(model.result == nil)
-            Button("Choose Folder…") { model.chooseFolder() }.disabled(model.isScanning)
-            Button("Rescan") { Task { await model.scan() } }.disabled(model.isScanning || model.result == nil)
+            .disabled(model.result == nil && model.history.isEmpty)
         }
         .padding()
     }
@@ -198,6 +448,15 @@ struct AnalyzerView: View {
                     .disabled(index == model.path.count - 1)
                 }
                 Spacer()
+                if let current = model.current {
+                    Button {
+                        model.explain(AdvisorItem(node: current))
+                    } label: {
+                        Label("Explain", systemImage: "sparkles")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Explain this folder with AI")
+                }
                 Text(Format.bytes(model.current?.size ?? 0)).font(.headline).monospacedDigit()
             }
             .padding(.horizontal)
@@ -226,8 +485,7 @@ struct AnalyzerView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([node.url]) }
-            Button("Move to Trash…", role: .destructive) { model.pendingTrash = [node.url] }
+            ItemActions(model: model, urls: [node.url], explainItem: AdvisorItem(node: node))
         }
     }
 
@@ -250,48 +508,21 @@ struct AnalyzerView: View {
             }
         }
     }
+}
 
-    // MARK: Large and old files
+/// Context-menu actions shared by every list in the analyzer.
+struct ItemActions: View {
+    let model: AnalyzerModel
+    let urls: [URL]
+    var explainItem: AdvisorItem?
 
-    @ViewBuilder
-    private func fileTable(_ files: [FileEntry], empty: String) -> some View {
-        if files.isEmpty {
-            ContentUnavailableView(empty, systemImage: "checkmark.circle")
-        } else {
-            VStack(spacing: 0) {
-                Table(files, selection: $model.tableSelection) {
-                    TableColumn("Name") { (file: FileEntry) in
-                        Text(file.name).lineLimit(1).truncationMode(.middle)
-                            .help(file.url.abbreviatedPath)
-                    }
-                    TableColumn("Size") { (file: FileEntry) in
-                        Text(Format.bytes(file.size)).monospacedDigit()
-                    }
-                    .width(90)
-                    TableColumn("Last Opened") { (file: FileEntry) in
-                        Text(Format.date(file.lastAccess))
-                    }
-                    .width(110)
-                    TableColumn("Location") { (file: FileEntry) in
-                        Text(file.url.deletingLastPathComponent().abbreviatedPath)
-                            .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                    }
-                }
-                .contextMenu(forSelectionType: URL.self) { urls in
-                    Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting(Array(urls)) }
-                    Button("Move to Trash…", role: .destructive) { model.pendingTrash = Array(urls) }
-                }
-                Divider()
-                HStack {
-                    let selectedSize = files.filter { model.tableSelection.contains($0.url) }.reduce(Int64(0)) { $0 + $1.size }
-                    Text("\(model.tableSelection.count) selected · \(Format.bytes(selectedSize))")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Move Selected to Trash…") { model.pendingTrash = Array(model.tableSelection) }
-                        .disabled(model.tableSelection.isEmpty)
-                }
-                .padding(10)
-            }
+    var body: some View {
+        Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
+        if let explainItem {
+            Button("Explain with AI") { model.explain(explainItem) }
         }
+        Divider()
+        Button("Move to External / NAS / iCloud…") { model.pendingMove = urls }
+        Button("Move to Trash…", role: .destructive) { model.pendingTrash = urls }
     }
 }

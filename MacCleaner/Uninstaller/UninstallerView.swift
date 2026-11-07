@@ -18,13 +18,43 @@ final class UninstallerModel {
     var runningApp: NSRunningApplication?
     var lastReport: DeletionReport?
 
+    var sort = AppSort(rawValue: UserDefaults.standard.string(forKey: Prefs.uninstallerSort) ?? "") ?? .name {
+        didSet { UserDefaults.standard.set(sort.rawValue, forKey: Prefs.uninstallerSort) }
+    }
+    var ascending = UserDefaults.standard.bool(forKey: Prefs.uninstallerAscending) {
+        didSet { UserDefaults.standard.set(ascending, forKey: Prefs.uninstallerAscending) }
+    }
+
     var filteredApps: [InstalledApp] {
-        guard !search.isEmpty else { return apps }
-        return apps.filter {
-            $0.name.localizedCaseInsensitiveContains(search)
-                || ($0.bundleID?.localizedCaseInsensitiveContains(search) ?? false)
+        let showApple = UserDefaults.standard.bool(forKey: Prefs.showAppleApps)
+        let matching = apps.filter { app in
+            if !showApple && app.isApple { return false }
+            guard !search.isEmpty else { return true }
+            return app.name.localizedCaseInsensitiveContains(search)
+                || (app.bundleID?.localizedCaseInsensitiveContains(search) ?? false)
+        }
+        return AppInventory.sorted(matching, by: sort, ascending: ascending)
+    }
+
+    /// Picks up sort changes made in Settings.
+    func reloadPreferences() {
+        let defaults = UserDefaults.standard
+        if let saved = AppSort(rawValue: defaults.string(forKey: Prefs.uninstallerSort) ?? ""), saved != sort { sort = saved }
+        let savedAscending = defaults.bool(forKey: Prefs.uninstallerAscending)
+        if savedAscending != ascending { ascending = savedAscending }
+    }
+
+    /// Picks a sort order; picking the current one again flips the direction.
+    func setSort(_ new: AppSort) {
+        if new == sort {
+            ascending.toggle()
+        } else {
+            sort = new
+            ascending = new.naturalAscending
         }
     }
+
+    var totalAppsSize: Int64 { filteredApps.reduce(0) { $0 + $1.size } }
 
     var selectedApp: InstalledApp? { apps.first { $0.id == selectedID } }
 
@@ -109,6 +139,7 @@ struct UninstallerView: View {
             }
         }
         .task { if model.apps.isEmpty { await model.load() } }
+        .onAppear { model.reloadPreferences() }
         .onChange(of: model.selectedID) { Task { await model.selectionChanged() } }
         .confirmationDialog(
             "Uninstall \(model.selectedApp?.name ?? "app")?",
@@ -144,6 +175,8 @@ struct UninstallerView: View {
             }
             .padding(8)
             Divider()
+            sortBar
+            Divider()
             List(model.filteredApps, selection: $model.selectedID) { app in
                 HStack {
                     AppIcon(url: app.url, size: 24)
@@ -154,10 +187,73 @@ struct UninstallerView: View {
                         }
                     }
                     Spacer()
-                    Text(Format.bytes(app.size)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(Format.bytes(app.size)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                        if let detail = sortDetail(app) {
+                            Text(detail).font(.caption2).foregroundStyle(.tertiary)
+                        }
+                    }
                 }
                 .tag(app.id)
             }
+        }
+    }
+
+    private var sortBar: some View {
+        HStack(spacing: 6) {
+            Menu {
+                ForEach(AppSort.allCases) { sort in
+                    Button {
+                        model.setSort(sort)
+                    } label: {
+                        if sort == model.sort {
+                            Label(sort.title, systemImage: model.ascending ? "chevron.up" : "chevron.down")
+                        } else {
+                            Text(sort.title)
+                        }
+                    }
+                }
+                Divider()
+                Picker("Order", selection: $model.ascending) {
+                    Text(ascendingTitle(true)).tag(true)
+                    Text(ascendingTitle(false)).tag(false)
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Label("Sort: \(model.sort.title)", systemImage: "arrow.up.arrow.down")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            Button {
+                model.ascending.toggle()
+            } label: {
+                Image(systemName: model.ascending ? "arrow.up" : "arrow.down")
+            }
+            .buttonStyle(.borderless)
+            .help(ascendingTitle(model.ascending))
+            Spacer()
+            Text("\(model.filteredApps.count) apps · \(Format.bytes(model.totalAppsSize))")
+                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+    }
+
+    private func ascendingTitle(_ ascending: Bool) -> String {
+        switch model.sort {
+        case .name: return ascending ? "A to Z" : "Z to A"
+        case .size: return ascending ? "Smallest first" : "Largest first"
+        case .lastUsed: return ascending ? "Least recently used first" : "Most recently used first"
+        case .dateAdded: return ascending ? "Oldest first" : "Newest first"
+        }
+    }
+
+    /// The date being sorted by, shown under the size.
+    private func sortDetail(_ app: InstalledApp) -> String? {
+        switch model.sort {
+        case .lastUsed: return app.lastUsed.map { "Used " + Format.date($0) } ?? "Never used"
+        case .dateAdded: return app.dateAdded.map { "Added " + Format.date($0) }
+        default: return nil
         }
     }
 
@@ -174,6 +270,8 @@ struct UninstallerView: View {
                         if let version = app.version {
                             Text("Version \(version)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
+                        Text("Last used \(app.lastUsed.map(Format.date) ?? "never") · Added \(Format.date(app.dateAdded))")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                     .help(app.bundleID ?? "")
                     Spacer(minLength: 8)
