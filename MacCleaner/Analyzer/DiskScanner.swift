@@ -74,12 +74,19 @@ final class DiskScanner {
     private var ageTotals: [AgeBucket: Int64] = [:]
     private var fileCount = 0
     private var extensionCache: [String: FileKind] = [:]
+    /// (device, inode) of every directory walked, so a folder reachable through
+    /// several paths (firmlinks, /.nofollow, bind mounts) is only counted once.
+    private var visited: Set<DirID> = []
+
+    private struct DirID: Hashable { let dev: dev_t; let ino: ino_t }
 
     init(cancel: CancelFlag) {
         self.cancel = cancel
         let lib = FileManager.default.homeDirectoryForCurrentUser.path + "/Library"
-        // Cloud folders hold placeholders. /System/Volumes would count the data volume twice.
-        skip = [lib + "/Mobile Documents", lib + "/CloudStorage", "/System/Volumes", "/Volumes", "/dev"]
+        // Cloud folders hold placeholders. /System/Volumes, /.nofollow and /.resolve are
+        // alternate views of the same volumes and would count everything again.
+        skip = [lib + "/Mobile Documents", lib + "/CloudStorage", "/System/Volumes", "/Volumes", "/dev",
+                "/.nofollow", "/.resolve", "/.vol"]
     }
 
     func scan(_ root: URL) -> DiskScanResult {
@@ -97,7 +104,7 @@ final class DiskScanner {
 
     private func walk(_ dir: URL, context: FileKind?) -> DiskNode {
         let fm = FileManager.default
-        guard !cancel.isSet, !skip.contains(dir.path),
+        guard !cancel.isSet, !skip.contains(dir.path), markVisited(dir),
               let entries = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys)
         else {
             return DiskNode(url: dir, isDirectory: true, size: 0, children: [])
@@ -130,5 +137,12 @@ final class DiskScanner {
         }
         nodes.sort { $0.size > $1.size }
         return DiskNode(url: dir, isDirectory: true, size: total, children: nodes)
+    }
+
+    /// Returns false if this directory was already walked via another path.
+    private func markVisited(_ dir: URL) -> Bool {
+        var st = stat()
+        guard lstat(dir.path, &st) == 0 else { return true }
+        return visited.insert(DirID(dev: st.st_dev, ino: st.st_ino)).inserted
     }
 }
